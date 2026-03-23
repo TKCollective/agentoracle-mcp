@@ -1,0 +1,32 @@
+{
+  "name": "agentoracle-mcp",
+  "display_name": "AgentOracle MCP Server",
+  "description": "MCP server that connects AI assistants (Claude, Cursor, Windsurf) to AgentOracle's real-time research API. Agents can research any topic and get structured JSON with summary, key facts, sources, and confidence scores via x402 protocol on Base.",
+  "repository": "https://github.com/TKCollective/agentoracle-mcp",
+  "homepage": "https://agentoracle.co",
+  "author": {
+    "name": "TKCollective",
+    "url": "https://github.com/TKCollective"
+  },
+  "categories": ["research", "ai-agents", "web3", "defi"],
+  "tags": ["x402", "research", "perplexity", "base", "usdc", "mcp", "ai-agents"],
+  "license": "MIT",
+  "tools": [
+    {
+      "name": "research",
+      "description": "Real-time research on any topic — structured JSON with summary, key facts, sources, confidence score. $0.02 USDC via x402."
+    },
+    {
+      "name": "deep-research",
+      "description": "Comprehensive deep analysis with expert findings, 10-15 facts, and analysis paragraph. $0.10 USDC via x402."
+    },
+    {
+      "name": "check-health",
+      "description": "Check if AgentOracle API is online with service status, uptime, and pricing."
+    },
+    {
+      "name": "get-manifest",
+      "description": "Get the x402 payment manifest with pricing, networks, and endpoint details."
+    }
+  ]
+}
