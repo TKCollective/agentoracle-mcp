@@ -1,5 +1,8 @@
 # AgentOracle MCP Server
 
+[![agentoracle-mcp MCP server](https://glama.ai/mcp/servers/TKCollective/agentoracle-mcp/badges/card.svg)](https://glama.ai/mcp/servers/TKCollective/agentoracle-mcp)
+
+
 An MCP (Model Context Protocol) server that connects AI assistants like Claude, Cursor, and Windsurf to [AgentOracle](https://agentoracle.co) — a pay-per-query real-time research API for AI agents.
 
 ## What It Does
