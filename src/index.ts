@@ -221,4 +221,20 @@ Returns: summary, key_facts, analysis, sources, confidence_score
 
 ## Links
 - Website: https://agentoracle.co
-- x402 Manifest:
+- x402 Manifest: https://agentoracle.co/.well-known/x402.json
+- GitHub: https://github.com/TKCollective/agentoracle-mcp`,
+      },
+    ],
+  })
+);
+
+async function main() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error("AgentOracle MCP server running on stdio");
+}
+
+main().catch((error) => {
+  console.error("Fatal error:", error);
+  process.exit(1);
+});
