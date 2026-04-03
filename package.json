@@ -1,0 +1,50 @@
+{
+  "name": "agentoracle-mcp",
+  "version": "2.0.0",
+  "description": "MCP server for AgentOracle — real-time research API for AI agents with x402 auto-pay support",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "agentoracle-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "agentoracle",
+    "research",
+    "x402",
+    "ai-agents",
+    "perplexity",
+    "claude",
+    "cursor",
+    "micropayments",
+    "usdc",
+    "base",
+    "skale"
+  ],
+  "author": "AgentOracle",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.7.0",
+    "@x402/fetch": "^2.8.0",
+    "@x402/core": "^2.8.0",
+    "@x402/evm": "^2.8.0",
+    "viem": "^2.0.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  }
+}
