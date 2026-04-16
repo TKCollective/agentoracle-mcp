@@ -1,104 +1,171 @@
-# AgentOracle MCP Server
+# agentoracle-mcp
 
-MCP server that connects AI assistants (Claude, Cursor, Windsurf, etc.) to [AgentOracle](https://agentoracle.co) — a pay-per-query research API for AI agents via the x402 protocol.
+**Add trust verification to Claude, Cursor, Windsurf, or any MCP client 
+in 60 seconds.**
 
-## Tools
+AgentOracle verifies claims before your agent acts on them. Per-claim 
+confidence scores, ACT/VERIFY/REJECT recommendations, and 4-source 
+verification — available as an MCP tool with one command.
 
-| Tool | Description | Cost |
-|------|-------------|------|
-| `research` | Real-time web research on any topic. Returns summary, key facts, sources, confidence score. | $0.02 USDC |
-| `deep-research` | Comprehensive expert-level analysis. Returns detailed findings with in-depth analysis. | $0.10 USDC |
-| `check-health` | Check if AgentOracle API is online and get service status. | Free |
-| `get-manifest` | Get the x402 payment manifest for programmatic integration. | Free |
+---
 
-## Resources
-
-| Resource | Description |
-|----------|-------------|
-| `docs://agentoracle/api` | Full API documentation with endpoints, pricing, and integration guide |
-
-## Install via Smithery
+## Install
 
 ```bash
-npx @smithery/cli install agentoracle-mcp
+npx agentoracle-mcp
 ```
 
-## Install Manually
+That's it. No API keys. No accounts. No wallet setup required to start.
 
-### Claude Desktop
+---
 
-Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+## Add to Claude Desktop
+
+Open your Claude Desktop config file:
+
+**Mac:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+Add this:
 
 ```json
 {
   "mcpServers": {
     "agentoracle": {
       "command": "npx",
-      "args": ["agentoracle-mcp"]
+      "args": ["-y", "agentoracle-mcp"]
     }
   }
 }
 ```
 
-### Cursor
+Restart Claude Desktop. You now have trust verification as a tool.
 
-Add to your Cursor MCP settings:
+---
+
+## Add to Cursor
+
+Open Cursor Settings → MCP → Add Server:
 
 ```json
 {
-  "mcpServers": {
-    "agentoracle": {
-      "command": "npx",
-      "args": ["agentoracle-mcp"]
+  "agentoracle": {
+    "command": "npx",
+    "args": ["-y", "agentoracle-mcp"]
+  }
+}
+```
+
+---
+
+## Add to Windsurf
+
+Open Windsurf Settings → MCP Servers → Add:
+
+```json
+{
+  "agentoracle": {
+    "command": "npx",
+    "args": ["-y", "agentoracle-mcp"]
+  }
+}
+```
+
+---
+
+## What you can do once installed
+
+Ask Claude, Cursor, or any MCP client:
+
+- *"Verify these claims before I include them in my report"*
+- *"Is it true that OpenAI acquired Anthropic in 2026?"*
+- *"Research AI agent frameworks and tell me what confidence score each claim gets"*
+- *"Fact-check this paragraph before I publish it"*
+
+AgentOracle breaks the input into individual claims, runs each one through 
+4 independent sources, and returns a confidence score and verdict for every 
+single claim.
+
+---
+
+## What comes back
+
+```json
+{
+  "overall_confidence": 0.91,
+  "recommendation": "act",
+  "claims": [
+    {
+      "claim": "LangGraph leads agent frameworks in 2026",
+      "verdict": "supported",
+      "confidence": 0.94,
+      "evidence": "Confirmed across 4 independent sources"
+    },
+    {
+      "claim": "OpenAI acquired Anthropic in early 2026",
+      "verdict": "refuted",
+      "confidence": 0.04,
+      "correction": "Anthropic remains independent as of April 2026"
     }
-  }
+  ]
 }
 ```
 
-## How It Works
+---
 
-1. Your AI assistant calls the `research` or `deep-research` tool with a question
-2. The MCP server sends the query to AgentOracle's API
-3. AgentOracle returns structured JSON with real-time research results
-4. Payment is handled via the x402 protocol — $0.02 or $0.10 USDC on Base mainnet
+## How verification works
 
-## Response Format
+Every claim runs through 4 sources in parallel:
 
-### Standard Research
-```json
-{
-  "query": "What are the latest AI agent frameworks?",
-  "result": {
-    "summary": "Concise summary of findings",
-    "key_facts": ["Fact 1", "Fact 2", "Fact 3"],
-    "sources": ["https://source1.com", "https://source2.com"],
-    "confidence_score": 0.92
-  }
-}
+1. **Sonar** — real-time web research
+2. **Sonar Pro** — deep multi-step analysis
+3. **Adversarial** — actively tries to disprove the claim
+4. **Gemma 4** — claim decomposition and confidence calibration
+
+Consensus builds the score. Contradiction flags the risk.
+
+| Score | Recommendation | Meaning |
+|-------|---------------|---------|
+| > 0.8 | `act` | Claims verified — proceed |
+| 0.5–0.8 | `verify` | Uncertain — needs review |
+| < 0.5 | `reject` | Contradicted — discard |
+
+---
+
+## Pricing
+
+| Endpoint | Price | What it does |
+|----------|-------|-------------|
+| `/preview` | Free | 20 req/hr, no payment needed |
+| `/evaluate` | $0.01/claim | Full per-claim verification |
+| `/research` | $0.02/query | Real-time research + verification |
+
+Payments via [x402 protocol](https://x402.org) — USDC on Base, SKALE 
+(gasless), or Stellar. No subscriptions. No minimums.
+
+The free `/preview` endpoint works with no wallet or setup. 
+Use it to try before you pay.
+
+---
+
+## Try it now without installing anything
+
+```bash
+curl -X POST https://agentoracle.co/preview \
+  -H "Content-Type: application/json" \
+  -d '{"query": "OpenAI acquired Anthropic in 2026"}'
 ```
 
-### Deep Research
-```json
-{
-  "query": "Comprehensive analysis of x402 protocol adoption",
-  "tier": "deep",
-  "result": {
-    "summary": "Detailed 2-3 paragraph summary",
-    "key_facts": ["10-15 detailed facts..."],
-    "analysis": "Expert analysis paragraph",
-    "sources": ["https://source1.com"],
-    "confidence_score": 0.95
-  }
-}
-```
+---
 
-## Links
+## Related
 
-- **API**: https://agentoracle.co
-- **x402 Manifest**: https://agentoracle.co/.well-known/x402.json
-- **Health Check**: https://agentoracle.co/health
-- **Twitter**: [@AgentOracle_AI](https://x.com/AgentOracle_AI)
+- [agentoracle.co](https://agentoracle.co) — main site + live demo
+- [Trust Layer docs](https://agentoracle.co/trust) — full API reference
+- [langchain-agentoracle](https://github.com/TKCollective/langchain-agentoracle) — LangChain integration
+- [crewai-agentoracle](https://github.com/TKCollective/crewai-agentoracle) — CrewAI integration
+- [x402 manifest](https://agentoracle.co/.well-known/x402.json) — agent-native pricing discovery
 
-## License
+---
 
-MIT
+Built by [TK Collective](https://agentoracle.co) · x402 native · Base · SKALE · Stellar
