@@ -78,8 +78,55 @@ const RESEARCH_ENDPOINT = `${AGENTORACLE_API}/research`;
 const DEEP_RESEARCH_ENDPOINT = `${AGENTORACLE_API}/deep-research`;
 const PREVIEW_ENDPOINT = `${AGENTORACLE_API}/preview`;
 const BATCH_ENDPOINT = `${AGENTORACLE_API}/research/batch`;
+const EVALUATE_ENDPOINT = `${AGENTORACLE_API}/evaluate`;
 const HEALTH_ENDPOINT = `${AGENTORACLE_API}/health`;
 const MANIFEST_ENDPOINT = `${AGENTORACLE_API}/.well-known/x402-manifest.json`;
+
+// ── Decixa Discovery ──────────────────────────────────────────────
+// Decixa indexes x402 endpoints across the ecosystem. We use their
+// /api/agent/resolve as primary multi-provider discovery, with a
+// local registry as fallback if Decixa is unreachable.
+const DECIXA_RESOLVE_ENDPOINT = "https://api.decixa.ai/api/agent/resolve";
+
+const DECIXA_CAPABILITIES = [
+  "search",
+  "extract",
+  "transform",
+  "analyze",
+  "generate",
+  "modify",
+  "communicate",
+  "transact",
+  "store",
+] as const;
+
+// Local fallback registry — AgentOracle's own offerings, used if
+// Decixa is unreachable. Mirrors Decixa's response shape for
+// consistent downstream handling.
+const LOCAL_FALLBACK_REGISTRY: Record<string, any> = {
+  analyze: {
+    id: "local-agentoracle-research",
+    name: "AgentOracle — Research",
+    endpoint: RESEARCH_ENDPOINT,
+    capability: "Analyze",
+    tags: ["Verification", "Data Enrichment"],
+    pricing: { model: "per_call", usdc_per_call: 0.02 },
+    latency_tier: "medium",
+    agent_ready: true,
+    source: "local_fallback",
+  },
+  search: {
+    id: "local-agentoracle-research-search",
+    name: "AgentOracle — Research",
+    endpoint: RESEARCH_ENDPOINT,
+    capability: "Search",
+    tags: ["Verification", "Live Web"],
+    pricing: { model: "per_call", usdc_per_call: 0.02 },
+    latency_tier: "medium",
+    agent_ready: true,
+    source: "local_fallback",
+  },
+};
 
 // Use paidFetch if available, otherwise standard fetch
 function getFetch(): typeof fetch {
@@ -89,7 +136,7 @@ function getFetch(): typeof fetch {
 // ── MCP Server ────────────────────────────────────────────────────
 const server = new McpServer({
   name: "AgentOracle",
-  version: "2.0.0",
+  version: "2.1.0",
 });
 
 // ── Tool: preview (FREE) ─────────────────────────────────────────
@@ -407,6 +454,124 @@ server.tool(
   }
 );
 
+// ── Tool: resolve (FREE) ─────────────────────────────────────────
+// Multi-provider discovery via Decixa, with local fallback.
+server.tool(
+  "resolve",
+  "Discover the best x402 API endpoint for a given capability + intent. Uses Decixa's /api/agent/resolve as primary multi-provider discovery, with a local AgentOracle registry as fallback. Returns the recommended endpoint plus top alternatives, ranked by latency, price, and tag match. Free, no payment required.",
+  {
+    capability: z
+      .enum(DECIXA_CAPABILITIES)
+      .describe(
+        "Verb-based capability: one of search / extract / transform / analyze / generate / modify / communicate / transact / store"
+      ),
+    intent: z
+      .string()
+      .max(500)
+      .describe(
+        "Natural-language description of the task. Example: 'verify a factual claim before acting'"
+      ),
+    budget: z
+      .number()
+      .optional()
+      .describe("Optional: maximum USDC per call"),
+    latency: z
+      .enum(["low", "medium", "high"])
+      .optional()
+      .describe("Optional: preferred latency tier"),
+  },
+  async ({ capability, intent, budget, latency }) => {
+    const constraints: Record<string, any> = {};
+    if (typeof budget === "number") constraints.budget = budget;
+    if (latency) constraints.latency = latency;
+
+    // Primary: Decixa
+    try {
+      const response = await fetch(DECIXA_RESOLVE_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          capability: capability.toLowerCase(),
+          intent,
+          constraints,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                { ...data, discovery_source: "decixa" },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      // Non-OK — fall through to local fallback
+      console.error(`[resolve] Decixa returned HTTP ${response.status}, using local fallback`);
+    } catch (err) {
+      console.error(
+        `[resolve] Decixa unreachable (${err instanceof Error ? err.message : String(err)}), using local fallback`
+      );
+    }
+
+    // Fallback: local registry
+    const local = LOCAL_FALLBACK_REGISTRY[capability.toLowerCase()];
+    if (local) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                recommended: local,
+                alternatives: [],
+                is_fallback: true,
+                strict_match_count: 1,
+                fallback_match_count: 0,
+                ranking_basis: "local_registry",
+                discovery_source: "local_fallback",
+                note:
+                  "Decixa discovery was unreachable — returned local AgentOracle registry entry only.",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              recommended: null,
+              alternatives: [],
+              is_fallback: true,
+              discovery_source: "local_fallback",
+              error: `No local registry entry for capability '${capability}' and Decixa unreachable.`,
+              suggestion:
+                "Try capability='analyze' or 'search' — AgentOracle's primary classification.",
+            },
+            null,
+            2
+          ),
+        },
+      ],
+      isError: true,
+    };
+  }
+);
+
 // ── Tool: get-manifest (FREE) ────────────────────────────────────
 server.tool(
   "get-manifest",
@@ -497,7 +662,7 @@ async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(
-    `AgentOracle MCP Server v2.0.0 running on stdio (x402 auto-pay: ${walletConfigured ? "enabled" : "disabled"})`
+    `AgentOracle MCP Server v2.1.0 running on stdio (x402 auto-pay: ${walletConfigured ? "enabled" : "disabled"})`
   );
 }
 
