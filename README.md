@@ -169,3 +169,16 @@ curl -X POST https://agentoracle.co/preview \
 ---
 
 Built by [TK Collective](https://agentoracle.co) · x402 native · Base · SKALE · Stellar
+
+## Discovery
+
+`agentoracle-mcp` is listed on independent x402 discovery directories:
+
+- **[Decixa](https://decixa.ai)** — Auto-indexed x402 directory with live probe verification. AgentOracle is classified under **Analyze** with tags *Verification, Data Enrichment*. View listings:
+  - [Research](https://decixa.ai/apis/e51015a6-b977-43e8-876d-e5f6bdaad92d) — $0.02/call
+  - [Deep Research](https://decixa.ai/apis/0fc0fd3a-ffb4-494e-b00f-4ec9a13c33ca) — $0.10/call
+  - [Evaluate](https://decixa.ai/apis/11abb2ea-da04-42aa-a0da-5d07a6e36255) — free during beta
+- **[Glama](https://glama.ai/mcp/servers/TKCollective/agentoracle-mcp)** — Curated MCP directory
+
+Future versions of `agentoracle-mcp` will use Decixa's `/api/agent/resolve` as primary capability discovery with a local fallback — letting agents find the best-matching x402 endpoint by intent rather than hardcoded URLs.
+
