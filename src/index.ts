@@ -88,6 +88,20 @@ const MANIFEST_ENDPOINT = `${AGENTORACLE_API}/.well-known/x402-manifest.json`;
 // local registry as fallback if Decixa is unreachable.
 const DECIXA_RESOLVE_ENDPOINT = "https://api.decixa.ai/api/agent/resolve";
 
+// Hardening parameters — tunable via env for ops flexibility
+const DECIXA_TIMEOUT_MS = parseInt(
+  process.env.DECIXA_RESOLVE_TIMEOUT_MS || "4000",
+  10
+);
+const DECIXA_MAX_RETRIES = parseInt(
+  process.env.DECIXA_RESOLVE_MAX_RETRIES || "2",
+  10
+);
+const DECIXA_RETRY_BASE_MS = parseInt(
+  process.env.DECIXA_RESOLVE_RETRY_BASE_MS || "250",
+  10
+);
+
 const DECIXA_CAPABILITIES = [
   "search",
   "extract",
@@ -136,7 +150,7 @@ function getFetch(): typeof fetch {
 // ── MCP Server ────────────────────────────────────────────────────
 const server = new McpServer({
   name: "AgentOracle",
-  version: "2.1.0",
+  version: "2.1.1",
 });
 
 // ── Tool: preview (FREE) ─────────────────────────────────────────
@@ -485,41 +499,91 @@ server.tool(
     if (typeof budget === "number") constraints.budget = budget;
     if (latency) constraints.latency = latency;
 
-    // Primary: Decixa
-    try {
-      const response = await fetch(DECIXA_RESOLVE_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          capability: capability.toLowerCase(),
-          intent,
-          constraints,
-        }),
-      });
+    // Primary: Decixa — with timeout + retry for transient failures.
+    // We retry on: network errors, AbortErrors (timeouts), and 5xx.
+    // We do NOT retry on: 4xx (these are deterministic — bad input,
+    // auth, not-found — retrying wastes time).
+    const requestBody = JSON.stringify({
+      capability: capability.toLowerCase(),
+      intent,
+      constraints,
+    });
 
-      if (response.ok) {
-        const data = await response.json();
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                { ...data, discovery_source: "decixa" },
-                null,
-                2
-              ),
-            },
-          ],
-        };
+    const maxAttempts = Math.max(1, DECIXA_MAX_RETRIES + 1);
+    let lastErrorDetail = "";
+    let lastStatus = 0;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), DECIXA_TIMEOUT_MS);
+      try {
+        const response = await fetch(DECIXA_RESOLVE_ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: requestBody,
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+
+        if (response.ok) {
+          const data = await response.json();
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  {
+                    ...data,
+                    discovery_source: "decixa",
+                    discovery_attempts: attempt,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
+
+        lastStatus = response.status;
+        lastErrorDetail = `HTTP ${response.status}`;
+
+        // Do not retry on 4xx — client error, deterministic
+        if (response.status >= 400 && response.status < 500) {
+          console.error(
+            `[resolve] Decixa returned ${response.status} (non-retryable), using local fallback`
+          );
+          break;
+        }
+
+        // 5xx — fall through to retry loop
+        console.error(
+          `[resolve] Decixa returned ${response.status} on attempt ${attempt}/${maxAttempts}`
+        );
+      } catch (err) {
+        clearTimeout(timer);
+        const name =
+          err instanceof Error ? err.name : "UnknownError";
+        const msg =
+          err instanceof Error ? err.message : String(err);
+        lastErrorDetail = `${name}: ${msg}`;
+        const isTimeout = name === "AbortError" || /abort/i.test(msg);
+        console.error(
+          `[resolve] Decixa ${isTimeout ? "timed out" : "error"} on attempt ${attempt}/${maxAttempts}: ${msg}`
+        );
       }
 
-      // Non-OK — fall through to local fallback
-      console.error(`[resolve] Decixa returned HTTP ${response.status}, using local fallback`);
-    } catch (err) {
-      console.error(
-        `[resolve] Decixa unreachable (${err instanceof Error ? err.message : String(err)}), using local fallback`
-      );
+      // Backoff before next attempt (skip after last)
+      if (attempt < maxAttempts) {
+        const delay =
+          DECIXA_RETRY_BASE_MS * Math.pow(2, attempt - 1);
+        await new Promise((r) => setTimeout(r, delay));
+      }
     }
+
+    console.error(
+      `[resolve] Decixa failed after ${maxAttempts} attempt(s) (${lastErrorDetail}), using local fallback`
+    );
 
     // Fallback: local registry
     const local = LOCAL_FALLBACK_REGISTRY[capability.toLowerCase()];
@@ -537,8 +601,10 @@ server.tool(
                 fallback_match_count: 0,
                 ranking_basis: "local_registry",
                 discovery_source: "local_fallback",
+                discovery_attempts: maxAttempts,
+                discovery_error: lastErrorDetail || "Decixa unreachable",
                 note:
-                  "Decixa discovery was unreachable — returned local AgentOracle registry entry only.",
+                  "Decixa discovery was unreachable after retries — returned local AgentOracle registry entry only.",
               },
               null,
               2
@@ -662,7 +728,7 @@ async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(
-    `AgentOracle MCP Server v2.1.0 running on stdio (x402 auto-pay: ${walletConfigured ? "enabled" : "disabled"})`
+    `AgentOracle MCP Server v2.1.1 running on stdio (x402 auto-pay: ${walletConfigured ? "enabled" : "disabled"})`
   );
 }
 
