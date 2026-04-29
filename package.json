@@ -1,6 +1,6 @@
 {
   "name": "agentoracle-mcp",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "MCP server for AgentOracle \u2014 claim verification for AI agents. Verify before you act. x402-native on Base, SKALE, Stellar.",
   "type": "module",
   "main": "dist/index.js",
