@@ -88,6 +88,25 @@ const MANIFEST_ENDPOINT = `${AGENTORACLE_API}/.well-known/x402-manifest.json`;
 // local registry as fallback if Decixa is unreachable.
 const DECIXA_RESOLVE_ENDPOINT = "https://api.decixa.ai/api/agent/resolve";
 
+// Hardening parameters — tunable via env for ops flexibility
+const DECIXA_TIMEOUT_MS = parseInt(
+  process.env.DECIXA_RESOLVE_TIMEOUT_MS || "4000",
+  10
+);
+const DECIXA_MAX_RETRIES = parseInt(
+  process.env.DECIXA_RESOLVE_MAX_RETRIES || "2",
+  10
+);
+const DECIXA_RETRY_BASE_MS = parseInt(
+  process.env.DECIXA_RESOLVE_RETRY_BASE_MS || "250",
+  10
+);
+// Jitter cap as fraction of base delay; 0.3 = up to ±30% jitter on each backoff.
+// Prevents thundering-herd retry sync when many clients hit Decixa simultaneously.
+const DECIXA_RETRY_JITTER = parseFloat(
+  process.env.DECIXA_RESOLVE_RETRY_JITTER || "0.3"
+);
+
 const DECIXA_CAPABILITIES = [
   "search",
   "extract",
@@ -136,7 +155,7 @@ function getFetch(): typeof fetch {
 // ── MCP Server ────────────────────────────────────────────────────
 const server = new McpServer({
   name: "AgentOracle",
-  version: "2.1.0",
+  version: "2.1.2",
 });
 
 // ── Tool: preview (FREE) ─────────────────────────────────────────
@@ -454,22 +473,45 @@ server.tool(
   }
 );
 
+// Lightweight intent → capability inference for the local fallback path.
+// Used only when Decixa is unreachable AND the caller didn't supply a
+// capability hint (Phase 3 made it optional). Keyword-based, no LLM call.
+function inferFallbackCapability(intent: string): string {
+  const t = intent.toLowerCase();
+  if (/\b(verify|fact[- ]?check|validate|claim|truth|hallucinat|adversarial|confidence)\b/.test(t))
+    return "analyze";
+  if (/\b(search|find|lookup|discover|where is|who is|what is)\b/.test(t))
+    return "search";
+  if (/\b(extract|parse|pull|scrape|read)\b/.test(t)) return "extract";
+  if (/\b(transform|convert|translate|reformat|rewrite)\b/.test(t))
+    return "transform";
+  if (/\b(generate|create|write|compose|draft)\b/.test(t)) return "generate";
+  if (/\b(modify|update|edit|change|patch)\b/.test(t)) return "modify";
+  if (/\b(send|notify|message|email|post|publish)\b/.test(t))
+    return "communicate";
+  if (/\b(pay|buy|purchase|swap|transfer|settle|transact)\b/.test(t))
+    return "transact";
+  if (/\b(store|save|persist|cache|record)\b/.test(t)) return "store";
+  return "analyze"; // AgentOracle's primary classification
+}
+
 // ── Tool: resolve (FREE) ─────────────────────────────────────────
 // Multi-provider discovery via Decixa, with local fallback.
 server.tool(
   "resolve",
-  "Discover the best x402 API endpoint for a given capability + intent. Uses Decixa's /api/agent/resolve as primary multi-provider discovery, with a local AgentOracle registry as fallback. Returns the recommended endpoint plus top alternatives, ranked by latency, price, and tag match. Free, no payment required.",
+  "Discover the best x402 API endpoint for a given intent. Uses Decixa's /api/agent/resolve (intent-driven, OpenAPI v1.1.0) as primary multi-provider discovery, with a local AgentOracle registry as fallback. Returns the recommended endpoint plus top alternatives, ranked by latency, price, and tag match. As of Decixa Phase 3 (v1.1.0), capability is optional — raw intent gets ~85% top-3 hit rate. Free, no payment required.",
   {
-    capability: z
-      .enum(DECIXA_CAPABILITIES)
-      .describe(
-        "Verb-based capability: one of search / extract / transform / analyze / generate / modify / communicate / transact / store"
-      ),
     intent: z
       .string()
       .max(500)
       .describe(
         "Natural-language description of the task. Example: 'verify a factual claim before acting'"
+      ),
+    capability: z
+      .enum(DECIXA_CAPABILITIES)
+      .optional()
+      .describe(
+        "Optional verb-based hint (Phase 3): search / extract / transform / analyze / generate / modify / communicate / transact / store. Decixa now resolves on intent alone with ~85% top-3 hit rate; pass capability only when you want to bias the result toward a specific verb."
       ),
     budget: z
       .number()
@@ -485,44 +527,146 @@ server.tool(
     if (typeof budget === "number") constraints.budget = budget;
     if (latency) constraints.latency = latency;
 
-    // Primary: Decixa
-    try {
-      const response = await fetch(DECIXA_RESOLVE_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          capability: capability.toLowerCase(),
-          intent,
-          constraints,
-        }),
-      });
+    // Primary: Decixa — with timeout + retry for transient failures.
+    // We retry on: network errors, AbortErrors (timeouts), 5xx, and 408.
+    // We do NOT retry on: 4xx other than 408 (deterministic — bad input,
+    // auth, not-found — retrying wastes time). 429 is treated as retryable
+    // ONLY when a Retry-After header is supplied; otherwise we fall back
+    // immediately to avoid hammering a rate-limited provider.
+    //
+    // As of Decixa v1.1.0 (Phase 3) capability is optional. We still send
+    // it when supplied as a bias hint; otherwise we omit the field and let
+    // the resolver work intent-first.
+    const requestPayload: Record<string, any> = { intent, constraints };
+    if (capability) requestPayload.capability = capability.toLowerCase();
+    const requestBody = JSON.stringify(requestPayload);
 
-      if (response.ok) {
-        const data = await response.json();
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                { ...data, discovery_source: "decixa" },
-                null,
-                2
-              ),
-            },
-          ],
-        };
+    const maxAttempts = Math.max(1, DECIXA_MAX_RETRIES + 1);
+    let last_error_detail = "";
+    // last_status is informational; reserved for future structured error responses.
+    let last_status = 0;
+    void last_status;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), DECIXA_TIMEOUT_MS);
+      try {
+        const response = await fetch(DECIXA_RESOLVE_ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: requestBody,
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+
+        if (response.ok) {
+          const data = await response.json();
+          // Decixa Phase 3 (v1.1.0) added recommendation_status, min_similarity,
+          // and trust_evidence to the response. Surface those so MCP clients can
+          // gate or display borderline matches without a second round-trip.
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  {
+                    ...data,
+                    discovery_source: "decixa",
+                    discovery_attempts: attempt,
+                    api_version: "decixa/v1.1.0",
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
+
+        last_status = response.status;
+        last_error_detail = `HTTP ${response.status}`;
+
+        // 408 Request Timeout — server-side timeout, retry it
+        if (response.status === 408) {
+          console.error(
+            `[resolve] Decixa returned 408 on attempt ${attempt}/${maxAttempts}, retrying`
+          );
+        }
+        // 429 Too Many Requests — only retry when Retry-After is present and
+        // small; otherwise fall back immediately rather than queue.
+        else if (response.status === 429) {
+          const retryAfter = response.headers.get("retry-after");
+          const retrySeconds = retryAfter ? parseInt(retryAfter, 10) : NaN;
+          if (
+            !isNaN(retrySeconds) &&
+            retrySeconds > 0 &&
+            retrySeconds <= 5 &&
+            attempt < maxAttempts
+          ) {
+            console.error(
+              `[resolve] Decixa 429 on attempt ${attempt}/${maxAttempts}, honoring Retry-After=${retrySeconds}s`
+            );
+            await new Promise((r) =>
+              setTimeout(r, retrySeconds * 1000)
+            );
+            continue; // skip default backoff, we've already waited
+          }
+          console.error(
+            `[resolve] Decixa 429 (rate-limited, no Retry-After or > 5s), using local fallback`
+          );
+          break;
+        }
+        // Other 4xx — deterministic, do not retry
+        else if (response.status >= 400 && response.status < 500) {
+          console.error(
+            `[resolve] Decixa returned ${response.status} (non-retryable), using local fallback`
+          );
+          break;
+        }
+
+        // 5xx — fall through to retry loop
+        else {
+          console.error(
+            `[resolve] Decixa returned ${response.status} on attempt ${attempt}/${maxAttempts}`
+          );
+        }
+      } catch (err) {
+        clearTimeout(timer);
+        const name =
+          err instanceof Error ? err.name : "UnknownError";
+        const msg =
+          err instanceof Error ? err.message : String(err);
+        last_error_detail = `${name}: ${msg}`;
+        const isTimeout = name === "AbortError" || /abort/i.test(msg);
+        console.error(
+          `[resolve] Decixa ${isTimeout ? "timed out" : "error"} on attempt ${attempt}/${maxAttempts}: ${msg}`
+        );
       }
 
-      // Non-OK — fall through to local fallback
-      console.error(`[resolve] Decixa returned HTTP ${response.status}, using local fallback`);
-    } catch (err) {
-      console.error(
-        `[resolve] Decixa unreachable (${err instanceof Error ? err.message : String(err)}), using local fallback`
-      );
+      // Backoff before next attempt (skip after last). Adds jitter to
+      // prevent thundering-herd resync across multiple clients retrying
+      // the same outage window.
+      if (attempt < maxAttempts) {
+        const baseDelay =
+          DECIXA_RETRY_BASE_MS * Math.pow(2, attempt - 1);
+        const jitterRange = baseDelay * DECIXA_RETRY_JITTER;
+        const jitter = (Math.random() * 2 - 1) * jitterRange; // [-range, +range]
+        const delay = Math.max(0, Math.round(baseDelay + jitter));
+        await new Promise((r) => setTimeout(r, delay));
+      }
     }
 
-    // Fallback: local registry
-    const local = LOCAL_FALLBACK_REGISTRY[capability.toLowerCase()];
+    console.error(
+      `[resolve] Decixa failed after ${maxAttempts} attempt(s) (${last_error_detail}), using local fallback`
+    );
+
+    // Fallback: local registry. capability is now optional, so we infer
+    // from intent text when missing — default to "analyze" since that's
+    // AgentOracle's primary classification.
+    const fallbackKey = capability
+      ? capability.toLowerCase()
+      : inferFallbackCapability(intent);
+    const local = LOCAL_FALLBACK_REGISTRY[fallbackKey];
     if (local) {
       return {
         content: [
@@ -537,8 +681,10 @@ server.tool(
                 fallback_match_count: 0,
                 ranking_basis: "local_registry",
                 discovery_source: "local_fallback",
+                discovery_attempts: maxAttempts,
+                discovery_error: last_error_detail || "Decixa unreachable",
                 note:
-                  "Decixa discovery was unreachable — returned local AgentOracle registry entry only.",
+                  "Decixa discovery was unreachable after retries — returned local AgentOracle registry entry only.",
               },
               null,
               2
@@ -558,9 +704,9 @@ server.tool(
               alternatives: [],
               is_fallback: true,
               discovery_source: "local_fallback",
-              error: `No local registry entry for capability '${capability}' and Decixa unreachable.`,
+              error: `No local registry entry for inferred capability '${fallbackKey}' and Decixa unreachable.`,
               suggestion:
-                "Try capability='analyze' or 'search' — AgentOracle's primary classification.",
+                "Pass an explicit capability='analyze' or 'search' — AgentOracle's primary classification.",
             },
             null,
             2
@@ -662,7 +808,7 @@ async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(
-    `AgentOracle MCP Server v2.1.0 running on stdio (x402 auto-pay: ${walletConfigured ? "enabled" : "disabled"})`
+    `AgentOracle MCP Server v2.1.2 running on stdio (x402 auto-pay: ${walletConfigured ? "enabled" : "disabled"})`
   );
 }
 
